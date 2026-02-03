@@ -524,13 +524,62 @@ class MultiAccountManager:
         self.account_list.append(config.account_id)
         logger.debug(f"[MULTI] [ACCOUNT] 添加账户: {config.account_id}")
 
+    def get_available_accounts(
+        self,
+        required_quota_types: Optional[Iterable[str]] = None
+    ) -> List[AccountManager]:
+        """获取可用账户列表（过滤掉禁用、过期、冷却中的账户）
+
+        Args:
+            required_quota_types: 需要的配额类型列表（如 ["text"], ["images"], ["text", "videos"]）
+
+        Returns:
+            可用账户列表
+
+        过滤规则：
+            1. disabled=True → 跳过（手动禁用）
+            2. is_expired() → 跳过（账户过期）
+            3. are_quotas_available() → 跳过（配额冷却中）
+        """
+        available = []
+
+        for acc in self.accounts.values():
+            # 1. 检查手动禁用
+            if acc.config.disabled:
+                continue
+
+            # 2. 检查账户过期
+            if acc.config.is_expired():
+                continue
+
+            # 3. 检查配额可用性（包括冷却检查）
+            if not acc.are_quotas_available(required_quota_types):
+                continue
+
+            available.append(acc)
+
+        return available
+
     async def get_account(
         self,
         account_id: Optional[str] = None,
         request_id: str = "",
         required_quota_types: Optional[Iterable[str]] = None
     ) -> AccountManager:
-        """获取账户 - Round-Robin轮询"""
+        """获取账户 - Round-Robin轮询
+
+        Args:
+            account_id: 指定账户ID（可选，如果指定则直接返回该账户）
+            request_id: 请求ID（用于日志）
+            required_quota_types: 需要的配额类型列表
+
+        Returns:
+            可用的账户管理器
+
+        Raises:
+            HTTPException(404): 指定的账户不存在
+            HTTPException(503): 没有可用账户
+        """
         req_tag = f"[req_{request_id}] " if request_id else ""
 
         # 指定账户ID时直接返回
@@ -544,14 +593,8 @@ class MultiAccountManager:
                 raise HTTPException(503, f"Account {account_id} quota temporarily unavailable")
             return account
 
-        # 筛选可用账户
-        available_accounts = [
-            acc for acc in self.accounts.values()
-            if (acc.should_retry() and
-                not acc.config.is_expired() and
-                not acc.config.disabled and
-                acc.are_quotas_available(required_quota_types))
-        ]
+        # 获取可用账户列表
+        available_accounts = self.get_available_accounts(required_quota_types)
 
         if not available_accounts:
             raise HTTPException(503, "No available accounts")
